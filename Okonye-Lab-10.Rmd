@@ -1,0 +1,347 @@
+---
+title: 'Lab #10'
+author: "Ifeoma Okonye"
+date: "2024-04-17"
+output: html_document
+---
+
+## Introduction {.tabset}
+
+To begin, I imported the required datalayers. The layers were riley county groundwater well points and the riley county boundry. I then did some tidying and made sure all data layers were in the right coordinate reference system.
+
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(pacman)
+p_load(sf, spdep, tidyverse, spatstat, tigris, terra, raster, RColorBrewer)
+
+
+r_county <- counties() %>% 
+  filter(STATEFP == 20, COUNTYFP == 161) %>% shift_geometry() #Riley county is STATEFP: 20, COUNTYFP: 161
+r_county
+st_crs(r_county)
+
+gw <- read.csv("RileyCNTYGWwells.csv", stringsAsFactors = FALSE)
+
+
+
+#Removing NAs
+
+gw <- gw[!(is.na(gw$LONGITUDE)),]
+names(gw)
+
+
+# Convert the groundwater well data to an sf object
+gw_sf <- st_as_sf(gw, coords = c("LONGITUDE", "LATITUDE"),
+                crs = "epsg:4326") #crs should be wgs84
+
+st_crs(gw_sf)
+
+# Transforming the crs to that of riley county
+gw_sf <- st_transform(gw_sf, st_crs(r_county))
+
+st_crs(gw_sf)
+
+#selecting onmly points that fall within riloey county
+gw_rc <- gw_sf[r_county, ]
+
+# Plotting the gw wells in riley county
+ggplot() +
+  geom_sf(data = gw_rc, color = "red") +
+  geom_sf(data = r_county, fill = NA)
+```
+
+### Question 1
+
+Using the Sf method, I created a ppp object using the Riley County groundwater well data and specified WELL_USE, WELL_DEPTH, and EST_YIELD as mark data. I then plotted the point locations without adding marks.
+
+```{r message=FALSE, warning=FALSE}
+
+#create ppp
+
+gww_ppp <- as.ppp(gw_rc %>% 
+                    dplyr::select(c(WELL_USE, WELL_DEPTH, EST_YIELD)))
+head(gww_ppp)
+head(gww_ppp$marks)
+
+plot(gww_ppp, use.marks = FALSE)
+plot(r_county, color = NA, add = TRUE)
+
+```
+
+
+
+### Question 2
+
+I removed duplicate groundwater well points using  the unique and distinct function and replotted the point locations. 
+
+```{r message=FALSE, warning=FALSE}
+
+gw_rc_unique <- unique(gw_rc)
+
+gww_unique <- distinct(gw_rc_unique, geometry,
+                       .keep_all = TRUE, na.rm = T)
+
+gww_ppp_unique <- as.ppp(gww_unique)
+
+marks(gww_ppp_unique) <- gww_unique[c("WELL_USE", "WELL_DEPTH", "EST_YIELD")]
+
+#glimpse(gww_unique)
+
+#Plot
+plot(st_geometry(r_county), color = NA, main = "Unique GWW Points in Riley County")
+plot(gww_ppp_unique, col = "black", use.marks = FALSE, add = TRUE)
+box(which = "plot",lty = "blank")
+
+```
+
+### Question 3
+
+I then created 3 plots of of the ppp object using one mark to display differences across points in each plot.
+
+```{r message=FALSE, warning=FALSE}
+
+# Set up color schemes for different types of marks
+color_depth <- terrain.colors(100)  # For WELL_DEPTH
+color_yield <- heat.colors(100)     # For EST_YIELD
+
+# Define the range of WELL_DEPTH and EST_YIELD for color mapping
+depth_range <- range(gww_ppp_unique$marks$WELL_DEPTH, na.rm = TRUE)
+yield_range <- range(gww_ppp_unique$marks$EST_YIELD, na.rm = TRUE)
+
+
+# Plot for WELL_USE
+plot(gww_ppp_unique, which.marks = "WELL_USE", main = "Wells by Use", cols = brewer.pal(8, "Set1"))
+plot(r_county, color = NA, add = TRUE)
+
+# Plot for WELL_DEPTH
+plot(gww_ppp_unique, which.marks = "WELL_DEPTH", main = "Wells by Depth",
+     cols = color_depth[cut(gww_ppp_unique$marks$WELL_DEPTH, breaks = 100, labels = FALSE)],
+     legend = TRUE)
+plot(r_county, color = NA, add = TRUE)
+
+# Plot for EST_YIELD
+plot(gww_ppp_unique, which.marks = "EST_YIELD", main = "Wells by Estimated Yield",
+     cols = color_yield[cut(gww_ppp_unique$marks$EST_YIELD, breaks = 100, labels = FALSE)],
+     legend = TRUE)
+plot(r_county, color = NA, add = TRUE)
+
+```
+
+### Question 4
+
+
+I computed the mean center of the groundwater well points then plotted this point with the other groundwater well points, differentiating the mean center point with a red star and drawing a circle showing the standard distance from the mean center.
+
+```{r message=FALSE, warning=FALSE}
+
+#get the coordinates of the groundwater well dataset
+xy <- st_coordinates(gww_unique)
+head(xy) #x coordinate in column 1 and y coordinate in column 2
+
+# mean center
+mc <- apply(xy, 2, mean) #apply the function `mean()` over columns
+
+# standard distance
+sd <- sqrt(sum((xy[,1] - mc[1])^2 + (xy[,2] - mc[2])^2) / nrow(xy)) #sum of squared differences between x coord and mean center x coord and y coord and mean center y coord divided by the number of records
+
+# make a circle using the standard distance
+bearing <- 1:360 * pi/180
+cx <- mc[1] + sd * cos(bearing)
+cy <- mc[2] + sd * sin(bearing)
+circle <- cbind(cx, cy)
+
+#Plotting
+plot(st_geometry(r_county), col='light blue', main = "Unweighted Mean Center of GWW Points in Riley County")
+plot(st_geometry(gww_unique), cex=.5, col = "black", pch =16, add = T)
+points(cbind(mc[1], mc[2]), pch='*', col='red', cex=3, add = T)
+lines(circle, col='red', lwd=1.5, add = T)
+
+```
+
+### Question 5
+
+
+I created a weighted mean center by taking the weighted average of the x and y coordinates. I then Calculated the weighted mean center of the groundwater wells using EST_YIELD as a weighting factor and repeated the same for WELL_DEPTH. I plotted these points with the groundwater well points and the unweighted mean center. 
+
+
+```{r message=FALSE, warning=FALSE}
+
+# Remove NA values from EST_YIELD and WELL_DEPTH
+gww_unique <- na.omit(gww_unique[, c("EST_YIELD", "WELL_DEPTH")])
+
+# Calculate the weighted mean center using EST_YIELD as a weighting factor
+weight_mean_x <- sum(st_coordinates(gww_unique)[, 1] * gww_unique$EST_YIELD) / sum(gww_unique$EST_YIELD)
+weight_mean_y <- sum(st_coordinates(gww_unique)[, 2] * gww_unique$EST_YIELD) / sum(gww_unique$EST_YIELD)
+
+weighted_mc_yield <- data.frame(X = weight_mean_x, Y = weight_mean_y)
+
+# Plotting weighted mean center by est_yield
+plot(st_geometry(r_county), col=NA, border = "black", main = "Weighted mean Center by Estimated Yield of GWW")
+points(st_coordinates(gww_unique)[,1], st_coordinates(gww_unique)[,2], col = "black", pch = 16, cex = .5, add = TRUE) # Plot groundwater well points
+points(cbind(mc[1], mc[2]), pch='*', col='red', cex=4, add = TRUE)  # Unweighted mean center
+points(weighted_mc_yield$X, weighted_mc_yield$Y, pch= 20, col='green', cex=3, add = TRUE) # Weighted mean center using EST_YIELD
+lines(circle, col='red', lwd=1.5, add = T)
+
+
+# Calculate the weighted mean center using EST_DEPTH as a weighting factor
+
+weight_mean_x1 <- sum(st_coordinates(gww_unique)[, 1] * gww_unique$WELL_DEPTH) / sum(gww_unique$WELL_DEPTH)
+weight_mean_y1 <- sum(st_coordinates(gww_unique)[, 2] * gww_unique$WELL_DEPTH) / sum(gww_unique$WELL_DEPTH)
+
+weighted_mc_depth <- data.frame(X = weight_mean_x1, Y = weight_mean_y1)
+
+
+# Plotting weighted mean center by well_depth
+plot(st_geometry(r_county), col=NA, border = "black", main = "Weighted mean Center by Well Depth")
+points(st_coordinates(gww_unique)[,1], st_coordinates(gww_unique)[,2], col = "black", pch = 16, cex = .5, add = TRUE) # Plot groundwater well points
+points(cbind(mc[1], mc[2]), pch='*', col='red', cex=4, add = TRUE)  # Unweighted mean center
+points(weighted_mc_depth$X, weighted_mc_depth$Y, pch= 20, col='orange', cex=3, add = TRUE) # Weighted mean center using EST_DEPTH
+lines(circle, col='red', lwd=1.5, add = T)
+
+
+# Plotting all weighted and unweighted points
+plot(st_geometry(r_county), col=NA, border = "black", main = "Weighted mean Center by Estimated Yield and Depth of GWW")
+points(st_coordinates(gww_unique)[,1], st_coordinates(gww_unique)[,2], col = "black", pch = 16, cex = .5, add = TRUE) # Plot groundwater well points
+points(cbind(mc[1], mc[2]), pch='*', col='red', cex=4, add = TRUE)  # Unweighted mean center
+points(weighted_mc_yield$X, weighted_mc_yield$Y, pch= 20, col='green', cex=3, add = TRUE) # Weighted mean center using EST_YIELD
+points(weighted_mc_depth$X, weighted_mc_depth$Y, pch= 20, col='orange', cex=3, add = TRUE) # Weighted mean center using EST_DEPTH
+lines(circle, col='red', lwd=1.5, add = T)
+
+
+```
+
+The shifts in the weighted mean center location of groundwater wells in Riley County when considering factors like EST_YIELD and WELL_DEPTH, can be as a result of landuse and agricultural practices. Riley County is predominantly agricultural, practices such as irrigation and crop type can impact groundwater yield and depth. Areas predominantly used for agricultural activities might have wells with greater yields to meet irrigation demands, leading to shifts in the weighted mean center when considering EST_YIELD.
+
+Urban areas can also affect where wells are drilled and how deep they need to go to access sufficient water, influencing shifts in the weighted mean center considering WELL_DEPTH.
+
+
+
+
+### Question 6
+
+I computed the point density by quadrants, specifying 100 quadrants and plotted the quadrants together with the groundwater well points. I then computed the intensity (density) of points in each quadrant. I created a spatstat image object and plotted the density by quadrants with the groundwater well points.
+
+```{r message=FALSE, warning=FALSE}
+
+gww_quad <- quadratcount(gww_ppp_unique, nx = 10, ny = 10)
+
+        
+
+## Intensity
+
+gww_quad_int <- intensity(gww_quad, image = TRUE)
+
+plot(gww_quad_int, main = "Intensity/Density of Groundwater Wells by Quadrat")
+plot(gww_ppp_unique, pch = 16, cols = "black", cex = 0.5, add = TRUE)
+plot(r_county, color = NA, add = TRUE)
+
+```
+
+### Question 7
+
+I created a kernel density plot for the groundwater well locations and added the groundwater well points to the plot.
+
+```{r message=FALSE, warning=FALSE}
+
+gww_kd <- density(gww_ppp_unique) 
+gww_kd
+
+plot(gww_kd, main = "Kernel Density Plot for the Groundwater Well Locations")
+plot(gww_ppp_unique, pch = 16, cols = "steelblue", cex = 0.5, add = TRUE)
+plot(r_county, color = NA, add = TRUE)
+
+```
+
+### Question 8
+
+I read in the elevation raster, set the crs of the elevation raster and the transformed the crs of Riley county to that of the elevation layer. I then clipped of Riley county from the elevation data. I broke this into four categories and converted it into a spatstat compatible image format using as.im.RasterLayer1() function provided. I went ahead to tesselate this image and then plotted the tesselation together with the groundwater well points.
+
+```{r message=FALSE, warning=FALSE}
+
+
+elev <- raster("elevation.tif")
+crs <- '+proj=utm +zone=11 +ellps=GRS80 +datum=NAD83 +units=m +no_defs'
+elev <- projectRaster(elev, crs = crs, method = "bilinear")
+
+r_county1 <- st_transform(r_county, crs = crs)
+
+# Clipping out RC
+elev_rc <- crop(elev, r_county1)
+elev_rc <- mask(elev_rc, mask = r_county1)
+plot(elev_rc)
+
+#Projecting Raster
+
+elev_rc <- projectRaster(elev_rc, crs = crs(r_county))
+
+# Break it into four categories by quantiles
+elev_cat <- cut(elev_rc, breaks = quantile(elev_rc, probs = seq(0, 1, by = 0.25)), include.lowest = TRUE)
+
+
+
+#Calling in custom function
+as.im.RasterLayer1 <- function(X) {
+    X <- X[[1]]
+    rs <- raster::res(X)
+    e <- as.vector(raster::extent(X))
+    out <- list(
+        v = as.matrix(X, wide=TRUE)[nrow(X):1, ],
+        dim = dim(X)[1:2],
+        xrange = e[1:2],
+        yrange = e[3:4],
+        xstep = rs[1],
+        ystep = rs[2],
+        xcol = e[1] + (1:ncol(X)) * rs[1] + 0.5 * rs[1],
+        yrow = e[4] - (nrow(X):1) * rs[2] + 0.5 * rs[2],
+        type = "real",
+        units  = list(singular="metre", plural="metre", multiplier=1) # replace "meters" with the actual units of your raster data
+    )
+    attr(out$units, "class") <- "unitname"
+    attr(out, "class") <- "im"
+    out
+}
+
+
+# Convert it to a spatstat compatible image format
+im <- as.im.RasterLayer1(elev_cat)
+
+# Tessellate this image
+tess <- tess(image = im)
+plot(tess)
+
+# Plot the tessellation together with the groundwater well points
+plot(tess, main = "Tesselation and Groundwater Well Points in Riley Country")
+plot(gww_ppp_unique, pch = "+", cols = "black", cex = 0.5, add = TRUE)
+
+```
+
+
+### Question 9
+
+
+
+Finally, I calculated the quadrant counts by tesselation area (elevation range) and plotted the intensity of groundwater well points across these areas.
+
+```{r message=FALSE, warning=FALSE}
+
+# Calculate quadrat counts by tessellation area (elevation range)
+quad_tess <- quadratcount(gww_ppp_unique, tess = tess)
+quad_tess
+quad_tess_intensity <- intensity(quad_tess, image = T)
+plot(quad_tess_intensity)
+
+
+# # Calculate the intensity of groundwater well points across these areas
+# gww_intensity <- rhohat(gww_ppp_unique, im)
+# 
+# 
+# # Plot the intensity
+# plot(rhohat(gww_ppp_unique, gww_intensity), main="Intensity of Groundwater Well Points Across Elevation Ranges")
+
+plot(quad_tess_intensity)
+points(gww_ppp_unique, pch = 16, cex = .5, add = T)
+```
+
+Looks like there are big differences in one location. It shows that more groundwater wells are being dug in more gentle slopes than the steep slopes. Probably because you get to better aquifers faster downhill than when drilling from up a hill.
